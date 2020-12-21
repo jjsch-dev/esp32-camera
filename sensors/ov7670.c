@@ -3,7 +3,7 @@
  * author: Juan Schiavoni <juanjoseschiavoni@hotmail.com>
  * This work is licensed under the MIT license, see the file LICENSE for details.
  *
- * OV7725 driver.
+ * OV7670 driver.
  *
  */
 #include <stdint.h>
@@ -37,12 +37,19 @@ struct regval_list {
 	uint8_t value;
 };
 
+struct windowing {           
+    int hstart;
+    int hstop; 
+    int vstart;
+    int vstop;
+};
+
 static struct regval_list ov7670_default_regs[] = {
     /* Sensor automatically sets output window when resolution changes. */    
     {TSLB, 0x04}, 
     
     /* Frame rate 30 fps at 12 Mhz clock */    
-	{CLKRC, 0x00},  
+	{CLKRC, 0x01},  
 	{DBLV,  0x4A},  
 
     {COM10, COM10_VSYNC_NEG | COM10_PCLK_MASK},
@@ -115,7 +122,6 @@ static struct regval_list ov7670_fmt_rgb565[] = {
 	{ 0xff,     0xff                        },  /* END MARKER */
 };
 
-
 static struct regval_list ov7670_vga[] = {
     { COM3,                 0x00 },
     { COM14,                0x00 },
@@ -125,6 +131,33 @@ static struct regval_list ov7670_vga[] = {
     { SCALING_PCLK_DIV,     0xF0 },
     { SCALING_PCLK_DELAY,   0x02 },
     { 0xff, 0xff },
+};
+
+/* These values from Omnivision */
+static struct windowing wind_vga = {
+    .hstart = 158, 
+    .hstop = 14,
+    .vstart = 10,
+    .vstop = 490
+};
+
+static struct regval_list ov7670_cif[] = {
+    { COM3,                 0x08 },
+    { COM14,                0x11 },
+    { SCALING_XSC,          0x3A },
+    { SCALING_YSC,          0x35 },
+    { SCALING_DCWCTR,       0x11 },
+    { SCALING_PCLK_DIV,     0xF1 },
+    { SCALING_PCLK_DELAY,   0x02 },
+    { 0xff, 0xff },
+};
+
+/* These values empirically determined */
+static struct windowing wind_cif = {
+    .hstart = 170, 
+    .hstop = 90, 
+    .vstart = 14,
+    .vstop = 494
 };
 
 static struct regval_list ov7670_qvga[] = {
@@ -138,6 +171,33 @@ static struct regval_list ov7670_qvga[] = {
     { 0xff, 0xff },
 };
 
+/* These values empirically determined */
+static struct windowing wind_qvga = {
+    .hstart = 168, 
+    .hstop = 24,  
+    .vstart = 10,
+    .vstop = 490
+};
+
+static struct regval_list ov7670_qcif[] = {
+    { COM3,                 0x0C },
+    { COM14,                0x11 },
+    { SCALING_XSC,          0x3A },
+    { SCALING_YSC,          0x35 },
+    { SCALING_DCWCTR,       0x11 },
+    { SCALING_PCLK_DIV,     0xF1 },
+    { SCALING_PCLK_DELAY,   0x52 },
+    { 0xff, 0xff },
+};
+
+/* These values empirically determined */
+static struct windowing wind_qcif = {
+    .hstart = 454,  
+    .hstop = 22,   
+    .vstart = 14,
+    .vstop = 494
+};
+
 static struct regval_list ov7670_qqvga[] = {
 	{ COM3,                 0x04 }, //DCW enable	
 	{ COM14,                0x1a }, //pixel clock divided by 4, manual scaling enable, DCW and PCLK controlled by register	
@@ -147,6 +207,14 @@ static struct regval_list ov7670_qqvga[] = {
 	{ SCALING_PCLK_DIV,     0xf2 }, //pixel clock divided by 4	
 	{ SCALING_PCLK_DELAY,   0x02 },
     { 0xff, 0xff },
+};
+
+/* These values empirically determined */
+static struct windowing wind_qqvga = {
+    .hstart = 190,
+    .hstop = 46,
+    .vstart = 10,
+    .vstop = 490
 };
 
 /*
@@ -171,38 +239,38 @@ int ret = 0;
 /*
  * Calculate the frame control registers.
  */
-static int ov7670_frame_control(sensor_t *sensor, int hstart, int hstop, int vstart, int vstop)
+static int ov7670_frame_control(sensor_t *sensor, struct windowing *wind_select )
 {
 struct regval_list frame[7];
 
     frame[0].reg_num = HSTART;
-    frame[0].value = (hstart >> 3);
+    frame[0].value = (wind_select->hstart >> 3) & 0xFF;
 
     frame[1].reg_num = HSTOP;
-    frame[1].value = (hstop >> 3);
+    frame[1].value = (wind_select->hstop >> 3) & 0xFF;
 
     frame[2].reg_num = HREF;
-    frame[2].value = (((hstop & 0x07) << 3) | (hstart & 0x07));
+    frame[2].value = (((wind_select->hstop & 0x07) << 3) | (wind_select->hstart & 0x07));
     
     frame[3].reg_num = VSTART;
-    frame[3].value = (vstart >> 2);
+    frame[3].value = (wind_select->vstart >> 2) & 0xFF;
     
     frame[4].reg_num = VSTOP;
-    frame[4].value = (vstop >> 2);
+    frame[4].value = (wind_select->vstop >> 2) & 0xFF;
 
     frame[5].reg_num = VREF;
-    frame[5].value = (((vstop & 0x02) << 2) | (vstart & 0x02));
+    frame[5].value = (((wind_select->vstop & 0x02) << 2) | (wind_select->vstart & 0x02));
 
     /* End mark */
-    frame[5].reg_num = 0xFF;
-    frame[5].value = 0xFF;
+    frame[6].reg_num = 0xFF;
+    frame[6].value = 0xFF;
 
     return ov7670_write_array(sensor, frame);
 }
 
 static int reset(sensor_t *sensor)
 {
-    int ret;
+int ret;
 
     // Reset all registers
     SCCB_Write(sensor->slv_addr, COM7, COM7_RESET);
@@ -256,47 +324,53 @@ int ret;
 
 static int set_framesize(sensor_t *sensor, framesize_t framesize)
 {
-   int ret;
+int ret;
+struct regval_list *regs;
+struct windowing *wind_select;
 
     // store clkrc before changing window settings...
     ov7670_clkrc =  SCCB_Read(sensor->slv_addr, CLKRC);
      
 	switch (framesize){
         case FRAMESIZE_VGA:
-            if( (ret = ov7670_write_array(sensor, ov7670_vga)) == 0 ) {
-                /* These values from Omnivision */
-                ret = ov7670_frame_control(sensor, 158, 14, 10, 490);
-            }
+            regs = ov7670_vga;
+            wind_select = &wind_vga;
+        break;
+        case FRAMESIZE_CIF:
+            regs = ov7670_cif;
+            wind_select = &wind_cif;    
         break;
 	    case FRAMESIZE_QVGA:
-            if( (ret = ov7670_write_array(sensor, ov7670_qvga)) == 0 ) {
-                /* These values from Omnivision */
-                ret = ov7670_frame_control(sensor, 158, 14, 10, 490);
-            }
+            regs = ov7670_qvga;
+            wind_select = &wind_qvga;
+        break;
+        case FRAMESIZE_QCIF:
+            regs = ov7670_qcif;
+            wind_select = &wind_qcif;
         break;
 	    case FRAMESIZE_QQVGA:
-            if( (ret = ov7670_write_array(sensor, ov7670_qqvga)) == 0 ) {
-                /* These values from Omnivision */
-                ret = ov7670_frame_control(sensor, 158, 14, 10, 490);
-            }
+            regs = ov7670_qqvga;
+            wind_select = &wind_qqvga;
         break; 
 
         default:
-            ret = -1;   
+            return -1;   
     }
 
+    if ((ret = ov7670_write_array(sensor, regs)) == 0) {
+        if ((ret = ov7670_frame_control(sensor, wind_select)) == 0) {
+            sensor->status.framesize = framesize;         
+        }
+    }
+            
     vTaskDelay(30 / portTICK_PERIOD_MS);
 
-    if (ret == 0) {
-        sensor->status.framesize = framesize;
-    }
-
-	return ret;
+    return ret;
 }
 
 static int set_colorbar(sensor_t *sensor, int enable)
 {
-    uint8_t ret = 0;
+int8_t ret = 0;
     // Read register scaling_xsc
     uint8_t reg = SCCB_Read(sensor->slv_addr, SCALING_XSC);
 

@@ -1166,11 +1166,7 @@ esp_err_t camera_init(const camera_config_t* config)
     } else if (pix_format == PIXFORMAT_YUV422 || pix_format == PIXFORMAT_RGB565) {
             s_state->fb_size = s_state->width * s_state->height * 2;
             if (is_hs_mode() && s_state->sensor.id.PID != OV7725_PID) {
-                if(s_state->sensor.id.PID == OV7670_PID) {
-                    s_state->sampling_mode = SM_0A0B_0B0C;
-                }else{
-                    s_state->sampling_mode = SM_0A00_0B00;
-                }
+                s_state->sampling_mode = SM_0A00_0B00;
                 s_state->dma_filter = &dma_filter_yuyv_highspeed;
             } else {
                 s_state->sampling_mode = SM_0A0B_0C0D;
@@ -1181,11 +1177,7 @@ esp_err_t camera_init(const camera_config_t* config)
     } else if (pix_format == PIXFORMAT_RGB888) {
         s_state->fb_size = s_state->width * s_state->height * 3;
         if (is_hs_mode()) {
-            if(s_state->sensor.id.PID == OV7670_PID) {
-                s_state->sampling_mode = SM_0A0B_0B0C;
-            }else{
-                s_state->sampling_mode = SM_0A00_0B00;
-            }
+            s_state->sampling_mode = SM_0A00_0B00;
             s_state->dma_filter = &dma_filter_rgb888_highspeed;
         } else {
             s_state->sampling_mode = SM_0A0B_0C0D;
@@ -1194,7 +1186,8 @@ esp_err_t camera_init(const camera_config_t* config)
         s_state->in_bytes_per_pixel = 2;       // camera sends RGB565
         s_state->fb_bytes_per_pixel = 3;       // frame buffer stores RGB888
     } else if (pix_format == PIXFORMAT_JPEG) {
-        if (s_state->sensor.id.PID != OV2640_PID && s_state->sensor.id.PID != OV3660_PID && s_state->sensor.id.PID != OV5640_PID) {
+        if (s_state->sensor.id.PID != OV2640_PID && s_state->sensor.id.PID != OV3660_PID && 
+            s_state->sensor.id.PID != OV7670_PID && s_state->sensor.id.PID != OV5640_PID) {
             ESP_LOGE(TAG, "JPEG format is only supported for ov2640, ov3660 and ov5640");
             err = ESP_ERR_NOT_SUPPORTED;
             goto fail;
