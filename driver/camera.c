@@ -48,6 +48,9 @@
 #if CONFIG_OV5640_SUPPORT
 #include "ov5640.h"
 #endif
+#if CONFIG_NT99141_SUPPORT
+#include "nt99141.h"
+#endif
 #if CONFIG_OV7670_SUPPORT
 #include "ov7670.h"
 #endif
@@ -60,6 +63,7 @@ typedef enum {
     CAMERA_OV3660 = 3660,
     CAMERA_OV5640 = 5640,
     CAMERA_OV7670 = 7670,
+    CAMERA_NT99141 = 9141,
 } camera_model_t;
 
 #define REG_PID        0x0A
@@ -373,12 +377,10 @@ static inline void IRAM_ATTR i2s_conf_reset()
     }
 }
 
-static void i2s_init()
+static void i2s_gpio_init(const camera_config_t* config)
 {
-    camera_config_t* config = &s_state->config;
-
     // Configure input GPIOs
-    gpio_num_t pins[] = {
+    const gpio_num_t pins[] = {
         config->pin_d7,
         config->pin_d6,
         config->pin_d5,
@@ -395,15 +397,21 @@ static void i2s_init()
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
+        .intr_type = GPIO_INTR_DISABLE,
+        .pin_bit_mask = 0LL
     };
     for (int i = 0; i < sizeof(pins) / sizeof(gpio_num_t); ++i) {
         if (rtc_gpio_is_valid_gpio(pins[i])) {
             rtc_gpio_deinit(pins[i]);
         }
-        conf.pin_bit_mask = 1LL << pins[i];
-        gpio_config(&conf);
+        conf.pin_bit_mask |= 1LL << pins[i];
     }
+    gpio_config(&conf);
+}
+
+static void i2s_init()
+{
+    camera_config_t* config = &s_state->config;
 
     // Route input GPIOs to I2S peripheral using GPIO matrix
     gpio_matrix_in(config->pin_d0, I2S0I_DATA_IN0_IDX, false);
@@ -959,12 +967,16 @@ esp_err_t camera_probe(const camera_config_t* config, camera_model_t* out_camera
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGD(TAG, "Enabling XCLK output");
-    camera_enable_out_clock(config);
+    if(config->pin_xclk >= 0) {
+      ESP_LOGD(TAG, "Enabling XCLK output");
+      camera_enable_out_clock(config);
+    }
 
-    ESP_LOGD(TAG, "Initializing SSCB");
-    SCCB_Init(config->pin_sscb_sda, config->pin_sscb_scl);
-	
+    if (config->pin_sscb_sda != -1) {
+      ESP_LOGD(TAG, "Initializing SSCB");
+      SCCB_Init(config->pin_sscb_sda, config->pin_sscb_scl);
+    }
+
     if(config->pin_pwdn >= 0) {
         ESP_LOGD(TAG, "Resetting camera by power down line");
         gpio_config_t conf = { 0 };
@@ -1000,7 +1012,7 @@ esp_err_t camera_probe(const camera_config_t* config, camera_model_t* out_camera
         camera_disable_out_clock();
         return ESP_ERR_CAMERA_NOT_DETECTED;
     }
-    
+
     //slv_addr = 0x30;
     ESP_LOGD(TAG, "Detected camera at address=0x%02x", slv_addr);
     sensor_id_t* id = &s_state->sensor.id;
@@ -1015,16 +1027,33 @@ esp_err_t camera_probe(const camera_config_t* config, camera_model_t* out_camera
         slv_addr = SCCB_Probe();
     }
 #endif
+#if CONFIG_NT99141_SUPPORT
+   if (slv_addr == 0x2a)
+    {
+        ESP_LOGD(TAG, "Resetting NT99141");
+        SCCB_Write16(0x2a, 0x3008, 0x01);//bank sensor
+    }
+#endif
 
     s_state->sensor.slv_addr = slv_addr;
     s_state->sensor.xclk_freq_hz = config->xclk_freq_hz;
 
-#if (CONFIG_OV3660_SUPPORT || CONFIG_OV5640_SUPPORT)
+#if (CONFIG_OV3660_SUPPORT || CONFIG_OV5640_SUPPORT || CONFIG_NT99141_SUPPORT)
     if(s_state->sensor.slv_addr == 0x3c){
         id->PID = SCCB_Read16(s_state->sensor.slv_addr, REG16_CHIDH);
         id->VER = SCCB_Read16(s_state->sensor.slv_addr, REG16_CHIDL);
         vTaskDelay(10 / portTICK_PERIOD_MS);
         ESP_LOGD(TAG, "Camera PID=0x%02x VER=0x%02x", id->PID, id->VER);
+    } else if(s_state->sensor.slv_addr == 0x2a){
+        id->PID = SCCB_Read16(s_state->sensor.slv_addr, 0x3000);
+        id->VER = SCCB_Read16(s_state->sensor.slv_addr, 0x3001);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+        ESP_LOGD(TAG, "Camera PID=0x%02x VER=0x%02x", id->PID, id->VER);
+        if(config->xclk_freq_hz > 10000000)
+        {
+            ESP_LOGE(TAG, "NT99141: only XCLK under 10MHz is supported, and XCLK is now set to 10M");
+            s_state->sensor.xclk_freq_hz = 10000000;
+        }
     } else {
 #endif
         id->PID = SCCB_Read(s_state->sensor.slv_addr, REG_PID);
@@ -1035,7 +1064,7 @@ esp_err_t camera_probe(const camera_config_t* config, camera_model_t* out_camera
         ESP_LOGD(TAG, "Camera PID=0x%02x VER=0x%02x MIDL=0x%02x MIDH=0x%02x",
                  id->PID, id->VER, id->MIDH, id->MIDL);
 
-#if (CONFIG_OV3660_SUPPORT || CONFIG_OV5640_SUPPORT)
+#if (CONFIG_OV3660_SUPPORT || CONFIG_OV5640_SUPPORT || CONFIG_NT99141_SUPPORT)
     }
 #endif
 
@@ -1069,6 +1098,12 @@ esp_err_t camera_probe(const camera_config_t* config, camera_model_t* out_camera
     case OV7670_PID:
         *out_camera_model = CAMERA_OV7670;
         ov7670_init(&s_state->sensor);
+        break;
+#endif
+#if CONFIG_NT99141_SUPPORT
+        case NT99141_PID:
+        *out_camera_model = CAMERA_NT99141;
+        NT99141_init(&s_state->sensor);
         break;
 #endif
     default:
@@ -1134,6 +1169,13 @@ esp_err_t camera_init(const camera_config_t* config)
             }
             break;
 #endif
+#if CONFIG_NT99141_SUPPORT
+        case NT99141_PID:
+            if (frame_size > FRAMESIZE_HD) {
+                frame_size = FRAMESIZE_HD;
+            }
+            break;
+#endif
         default:
             return ESP_ERR_CAMERA_NOT_SUPPORTED;
     }
@@ -1143,7 +1185,7 @@ esp_err_t camera_init(const camera_config_t* config)
 
     if (pix_format == PIXFORMAT_GRAYSCALE) {
         s_state->fb_size = s_state->width * s_state->height;
-        if (s_state->sensor.id.PID == OV3660_PID || s_state->sensor.id.PID == OV5640_PID) {
+        if (s_state->sensor.id.PID == OV3660_PID || s_state->sensor.id.PID == OV5640_PID || s_state->sensor.id.PID == NT99141_PID) {
             if (is_hs_mode()) {
                 s_state->sampling_mode = SM_0A00_0B00;
                 s_state->dma_filter = &dma_filter_yuyv_highspeed;
@@ -1186,8 +1228,9 @@ esp_err_t camera_init(const camera_config_t* config)
         s_state->in_bytes_per_pixel = 2;       // camera sends RGB565
         s_state->fb_bytes_per_pixel = 3;       // frame buffer stores RGB888
     } else if (pix_format == PIXFORMAT_JPEG) {
-        if (s_state->sensor.id.PID != OV2640_PID && s_state->sensor.id.PID != OV3660_PID && 
-            s_state->sensor.id.PID != OV7670_PID && s_state->sensor.id.PID != OV5640_PID) {
+        if (s_state->sensor.id.PID != OV2640_PID && s_state->sensor.id.PID != OV3660_PID &&
+            s_state->sensor.id.PID != OV7670_PID && s_state->sensor.id.PID != OV5640_PID &&
+            s_state->sensor.id.PID != NT99141_PID) {
             ESP_LOGE(TAG, "JPEG format is only supported for ov2640, ov3660 and ov5640");
             err = ESP_ERR_NOT_SUPPORTED;
             goto fail;
@@ -1324,6 +1367,7 @@ fail:
 esp_err_t esp_camera_init(const camera_config_t* config)
 {
     camera_model_t camera_model = CAMERA_NONE;
+    i2s_gpio_init(config);
     esp_err_t err = camera_probe(config, &camera_model);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera probe failed with error 0x%x", err);
@@ -1344,6 +1388,8 @@ esp_err_t esp_camera_init(const camera_config_t* config)
         ESP_LOGI(TAG, "Detected OV5640 camera");
     } else if (camera_model == CAMERA_OV7670) {
         ESP_LOGI(TAG, "Detected OV7670 camera");
+    } else if (camera_model == CAMERA_NT99141) {
+        ESP_LOGI(TAG, "Detected NT99141 camera");
     } else {
         ESP_LOGI(TAG, "Camera not supported");
         err = ESP_ERR_CAMERA_NOT_SUPPORTED;
@@ -1390,9 +1436,12 @@ esp_err_t esp_camera_deinit()
     }
     dma_desc_deinit();
     camera_fb_deinit();
+
+    if(s_state->config.pin_xclk >= 0) {
+      camera_disable_out_clock();
+    }
     free(s_state);
     s_state = NULL;
-    camera_disable_out_clock();
     periph_module_disable(PERIPH_I2S0_MODULE);
     return ESP_OK;
 }
@@ -1448,7 +1497,7 @@ sensor_t * esp_camera_sensor_get()
     return &s_state->sensor;
 }
 
-esp_err_t esp_camera_save_to_nvs(const char *key) 
+esp_err_t esp_camera_save_to_nvs(const char *key)
 {
 #if ESP_IDF_VERSION_MAJOR > 3
     nvs_handle_t handle;
@@ -1456,7 +1505,7 @@ esp_err_t esp_camera_save_to_nvs(const char *key)
     nvs_handle handle;
 #endif
     esp_err_t ret = nvs_open(key,NVS_READWRITE,&handle);
-    
+
     if (ret == ESP_OK) {
         sensor_t *s = esp_camera_sensor_get();
         if (s != NULL) {
@@ -1467,7 +1516,7 @@ esp_err_t esp_camera_save_to_nvs(const char *key)
             }
             return ret;
         } else {
-            return ESP_ERR_CAMERA_NOT_DETECTED; 
+            return ESP_ERR_CAMERA_NOT_DETECTED;
         }
         nvs_close(handle);
         return ret;
@@ -1476,7 +1525,7 @@ esp_err_t esp_camera_save_to_nvs(const char *key)
     }
 }
 
-esp_err_t esp_camera_load_from_nvs(const char *key) 
+esp_err_t esp_camera_load_from_nvs(const char *key)
 {
 #if ESP_IDF_VERSION_MAJOR > 3
     nvs_handle_t handle;
@@ -1486,7 +1535,7 @@ esp_err_t esp_camera_load_from_nvs(const char *key)
   uint8_t pf;
 
   esp_err_t ret = nvs_open(key,NVS_READWRITE,&handle);
-  
+
   if (ret == ESP_OK) {
       sensor_t *s = esp_camera_sensor_get();
       camera_status_t st;
@@ -1507,7 +1556,7 @@ esp_err_t esp_camera_load_from_nvs(const char *key)
             s->set_denoise(s,st.denoise);
             s->set_exposure_ctrl(s,st.aec);
             s->set_framesize(s,st.framesize);
-            s->set_gain_ctrl(s,st.agc);          
+            s->set_gain_ctrl(s,st.agc);
             s->set_gainceiling(s,st.gainceiling);
             s->set_hmirror(s,st.hmirror);
             s->set_lenc(s,st.lenc);
@@ -1520,7 +1569,7 @@ esp_err_t esp_camera_load_from_nvs(const char *key)
             s->set_wb_mode(s,st.wb_mode);
             s->set_whitebal(s,st.awb);
             s->set_wpc(s,st.wpc);
-        }  
+        }
         ret = nvs_get_u8(handle,CAMERA_PIXFORMAT_NVS_KEY,&pf);
         if (ret == ESP_OK) {
           s->set_pixformat(s,pf);
